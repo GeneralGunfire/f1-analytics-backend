@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
-from app.routes import health, sessions
+from app.routes import health, sessions, telemetry
 from app.services.fastf1_service import init_fastf1_cache
 
 # ---------------------------------------------------------------------------
@@ -80,3 +80,4 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 app.include_router(health.router)
 app.include_router(sessions.router)
+app.include_router(telemetry.router)
