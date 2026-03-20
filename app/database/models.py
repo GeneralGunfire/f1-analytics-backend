@@ -72,6 +72,7 @@ class Race(Base):
 
 class RaceResult(Base):
     __tablename__ = "race_results"
+    __table_args__ = (UniqueConstraint("race_id"),)
     id = Column(Integer, primary_key=True, autoincrement=True)
     race_id = Column(Integer, ForeignKey("races.id"), nullable=False)
     winner_code = Column(String(3))
