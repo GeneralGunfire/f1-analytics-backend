@@ -26,7 +26,8 @@ logger = logging.getLogger(__name__)
 
 JOLPICA_BASE = "https://api.jolpi.ca/ergast/f1"
 OPENF1_BASE = "https://api.openf1.org/v1"
-SLEEP_BETWEEN_CALLS = 0.2
+SLEEP_BETWEEN_CALLS = 0.5
+RETRY_ON_429_WAIT = 65  # seconds to wait when rate limited
 
 # ===========================================================================
 # CIRCUITS
@@ -336,6 +337,7 @@ CIRCUIT_ID_MAP = {
     "rodriguez": "mexico",
     "interlagos": "brazil",
     "las_vegas": "las-vegas",
+    "vegas": "las-vegas",
     "losail": "qatar",
     "yas_marina": "abu-dhabi",
     "paul_ricard": "france",
@@ -490,15 +492,28 @@ async def seed_drivers(session):
     return count
 
 
-async def fetch_json(client, url):
+async def fetch_json(client, url, _retries=3):
     await asyncio.sleep(SLEEP_BETWEEN_CALLS)
-    try:
-        resp = await client.get(url, timeout=30)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        logger.warning(f"API error fetching {url}: {e}")
-        return None
+    for attempt in range(_retries):
+        try:
+            resp = await client.get(url, timeout=30)
+            if resp.status_code == 429:
+                logger.warning(f"Rate limited (429) on {url} — waiting {RETRY_ON_429_WAIT}s (attempt {attempt + 1}/{_retries})")
+                await asyncio.sleep(RETRY_ON_429_WAIT)
+                continue
+            if resp.status_code == 404:
+                # Not found — no point retrying
+                return None
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            if attempt < _retries - 1:
+                logger.warning(f"API error fetching {url}: {e} — retrying in 5s")
+                await asyncio.sleep(5)
+            else:
+                logger.warning(f"API error fetching {url}: {e}")
+                return None
+    return None
 
 
 def get_fastf1_key_for_circuit(circuit_id):
@@ -891,9 +906,9 @@ async def seed_tyre_strategies(session, client):
                 compound = stint.get("compound", "UNKNOWN")
                 if compound:
                     compound = compound.upper()
-                lap_start = stint.get("lap_start", 1)
-                lap_end = stint.get("lap_end", lap_start)
-                laps = max(1, (lap_end or lap_start) - (lap_start or 1) + 1)
+                lap_start = stint.get("lap_start") or 1
+                lap_end = stint.get("lap_end") or lap_start
+                laps = max(1, lap_end - lap_start + 1)
                 stint_num = stint.get("stint_number", 1)
                 stmt = pg_insert(models.TyreStrategy).values(
                     race_id=race.id,
