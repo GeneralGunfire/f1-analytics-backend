@@ -8,8 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
-from app.routes import health, sessions, telemetry
+from app.routes import analytics, health, race, sessions, telemetry
+from app.routes.static_data import router as static_router
 from app.services.fastf1_service import init_fastf1_cache
+from app.database.connection import test_connection, engine, Base
+from app.database import models  # noqa: F401 — registers all ORM tables
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -34,6 +37,17 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting up — env=%s", settings.app_env)
     init_fastf1_cache()
+    db_ok = await test_connection()
+    if db_ok:
+        logger.info("Database connected — running table migrations")
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("Tables ready")
+        except Exception as e:
+            logger.error("Migration failed: %s", e)
+    else:
+        logger.warning("Database connection failed — static data routes will not work")
     yield
     logger.info("Shutting down")
 
@@ -81,3 +95,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 app.include_router(health.router)
 app.include_router(sessions.router)
 app.include_router(telemetry.router)
+app.include_router(analytics.router)
+app.include_router(race.router)
+app.include_router(static_router)
