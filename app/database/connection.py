@@ -23,7 +23,7 @@ else:
     ASYNC_DATABASE_URL = DATABASE_URL
 
 engine = create_async_engine(
-    ASYNC_DATABASE_URL,
+    ASYNC_DATABASE_URL or "postgresql+asyncpg://localhost/placeholder",
     pool_size=2,
     max_overflow=1,
     pool_pre_ping=True,
