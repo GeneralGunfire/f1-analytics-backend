@@ -9,6 +9,11 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+print(
+    "[DB] DATABASE_URL:",
+    f"{DATABASE_URL[:20]}..." if len(DATABASE_URL) > 20 else (DATABASE_URL or "NOT SET"),
+    flush=True,
+)
 
 # Convert postgresql:// to postgresql+asyncpg:// if needed
 if DATABASE_URL.startswith("postgresql://"):
