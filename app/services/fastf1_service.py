@@ -86,7 +86,6 @@ def _available_session_types(row: Any) -> list[str]:
 
 # ── Telemetry comparison ───────────────────────────────────────────────────
 
-@lru_cache(maxsize=20)
 def get_telemetry_compare(
     year: int,
     race: str,
@@ -111,9 +110,9 @@ def get_telemetry_compare(
         year, race, session_type, driver_codes,
     )
 
-    # Load session with telemetry
+    # Load session with telemetry and weather
     session = fastf1.get_session(year, race, session_type)
-    session.load(laps=True, telemetry=True, weather=False, messages=False)
+    session.load(laps=True, telemetry=True, weather=True, messages=False)
 
     # Event metadata
     event = session.event
@@ -152,8 +151,14 @@ def get_telemetry_compare(
         interp[driver] = ch
         time_at_grid[driver] = ch["time_seconds"]
 
-    # Delta vs fastest driver
-    deltas, fastest_driver = _calculate_deltas(time_at_grid)
+    # Delta vs fastest driver (grid-interpolated; used only for delta curves)
+    deltas, _fastest_interp = _calculate_deltas(time_at_grid)
+
+    # Determine fastest_driver from actual lap_times_s (source of truth)
+    fastest_driver = min(
+        (d for d in lap_times_s if d in raw_data),
+        key=lambda d: lap_times_s[d],
+    )
 
     def fmt_lap(s: float | None) -> str:
         if s is None:
@@ -162,10 +167,66 @@ def get_telemetry_compare(
         sec = s % 60
         return f"{m}:{sec:06.3f}"
 
+    # Extract weather averages
+    air_temp = track_temp = humidity = wind_speed = None
+    rainfall = False
+    try:
+        weather = session.weather_data
+        if weather is not None and not weather.empty:
+            if "AirTemp" in weather.columns:
+                air_temp = round(float(weather["AirTemp"].mean()), 1)
+            if "TrackTemp" in weather.columns:
+                track_temp = round(float(weather["TrackTemp"].mean()), 1)
+            if "Humidity" in weather.columns:
+                humidity = round(float(weather["Humidity"].mean()), 1)
+            if "WindSpeed" in weather.columns:
+                wind_speed = round(float(weather["WindSpeed"].mean()), 1)
+            if "Rainfall" in weather.columns:
+                rainfall = bool(weather["Rainfall"].any())
+    except Exception as exc:
+        logger.warning("Weather extraction failed: %s", exc)
+
+    # Extract tire stints per driver (full race strategy)
+    tire_stints: dict[str, list] = {}
+    try:
+        for driver in driver_codes:
+            driver_laps = session.laps.pick_drivers(driver)
+            stints: list[dict] = []
+            if not driver_laps.empty and "Stint" in driver_laps.columns:
+                for stint_num, stint_laps in driver_laps.groupby("Stint"):
+                    compound = None
+                    if "Compound" in stint_laps.columns:
+                        vals = [
+                            v for v in stint_laps["Compound"].tolist()
+                            if str(v).strip() not in ("nan", "None", "", "UNKNOWN")
+                        ]
+                        compound = str(vals[0]).upper() if vals else None
+                    stints.append({
+                        "stint": int(stint_num),
+                        "compound": compound,
+                        "first_lap": int(stint_laps["LapNumber"].min()),
+                        "last_lap": int(stint_laps["LapNumber"].max()),
+                        "laps_count": len(stint_laps),
+                    })
+            tire_stints[driver] = stints
+    except Exception as exc:
+        logger.warning("Tire stints extraction failed: %s", exc)
+
     # Build output telemetry dict
     telemetry_out: dict[str, dict] = {}
     for driver in raw_data:
         ch = interp[driver]
+
+        # team_name from session results
+        team_name = ""
+        try:
+            if hasattr(session, "results") and session.results is not None and len(session.results) > 0:
+                if driver in session.results["Abbreviation"].values:
+                    row = session.results[session.results["Abbreviation"] == driver].iloc[0]
+                    team_name = str(row.get("TeamName", ""))
+        except Exception:
+            pass
+
         telemetry_out[driver] = {
             "color": DRIVER_COLORS.get(driver, "#FFFFFF"),
             "lap_number": int(raw_data[driver]["lap_number"]),
@@ -179,6 +240,12 @@ def get_telemetry_compare(
             "delta": np.round(deltas[driver], 3).tolist(),
             "x": np.round(ch.get("x", np.array([])), 1).tolist(),
             "y": np.round(ch.get("y", np.array([])), 1).tolist(),
+            "compound": raw_data[driver].get("compound"),
+            "sector1": raw_data[driver].get("sector1"),
+            "sector2": raw_data[driver].get("sector2"),
+            "sector3": raw_data[driver].get("sector3"),
+            "team_name": team_name,
+            "tire_stints": tire_stints.get(driver, []),
         }
 
     # Summary & insights
@@ -204,6 +271,11 @@ def get_telemetry_compare(
             "drivers": list(telemetry_out.keys()),
             "track_name": track_name,
             "date": session_date,
+            "air_temp": air_temp,
+            "track_temp": track_temp,
+            "humidity": humidity,
+            "wind_speed": wind_speed,
+            "rainfall": rainfall,
         },
         "telemetry": telemetry_out,
         "summary": summary,
@@ -217,6 +289,17 @@ def get_telemetry_compare(
 
 
 # ── Private helpers ────────────────────────────────────────────────────────
+
+def _fmt_sector(td) -> str | None:
+    """Format a timedelta sector time as a seconds string, e.g. '27.543'."""
+    try:
+        if not pd.notna(td):
+            return None
+        s = td.total_seconds()
+        return f"{s:.3f}" if s > 0 else None
+    except Exception:
+        return None
+
 
 def _extract_driver_telemetry(session: Any, driver: str) -> tuple[dict | None, float]:
     """Return (raw_telemetry_dict, lap_time_seconds) for the driver's fastest lap."""
@@ -259,6 +342,21 @@ def _extract_driver_telemetry(session: Any, driver: str) -> tuple[dict | None, f
         if pd.notna(ln):
             lap_number = int(ln)
 
+    # Compound — normalise invalid values to None
+    compound: str | None = None
+    try:
+        raw_compound = fastest.get("Compound", None)
+        c_str = str(raw_compound) if raw_compound is not None else ""
+        if c_str not in ("nan", "None", "", "UNKNOWN"):
+            compound = c_str
+    except Exception:
+        pass
+
+    # Sector times
+    sector1 = _fmt_sector(fastest.get("Sector1Time"))
+    sector2 = _fmt_sector(fastest.get("Sector2Time"))
+    sector3 = _fmt_sector(fastest.get("Sector3Time"))
+
     raw: dict = {
         "distances":    tel["Distance"].values.astype(float),
         "speeds":       tel["Speed"].values.astype(float) if "Speed" in tel.columns else np.zeros(len(tel)),
@@ -270,6 +368,10 @@ def _extract_driver_telemetry(session: Any, driver: str) -> tuple[dict | None, f
         "y":            tel["Y"].values.astype(float) if "Y" in tel.columns else np.array([]),
         "max_distance": float(tel["Distance"].max()),
         "lap_number":   lap_number,
+        "compound":     compound,
+        "sector1":      sector1,
+        "sector2":      sector2,
+        "sector3":      sector3,
     }
     return raw, lap_time_s
 
@@ -316,6 +418,50 @@ def _calculate_deltas(
     return deltas, fastest
 
 
+@lru_cache(maxsize=20)
+def get_all_laps(year: int, race: str, session_type: str) -> list[dict]:
+    """
+    Return all valid personal-best or race laps for all drivers in a session.
+
+    Loads laps only (no telemetry) for speed. Cached by (year, race, session_type).
+    """
+    logger.info("Loading all laps year=%d race=%s session=%s", year, race, session_type)
+    session = fastf1.get_session(year, race, session_type)
+    session.load(laps=True, telemetry=False, weather=False, messages=False)
+
+    rows: list[dict] = []
+    for _, lap in session.laps.iterrows():
+        lap_time = lap.get("LapTime")
+        if not pd.notna(lap_time):
+            continue
+        lap_time_s = float(lap_time.total_seconds())
+        if lap_time_s <= 0:
+            continue
+
+        compound = None
+        if "Compound" in lap.index and pd.notna(lap.get("Compound")):
+            compound = str(lap["Compound"])
+
+        stint = None
+        if "Stint" in lap.index and pd.notna(lap.get("Stint")):
+            stint = int(lap["Stint"])
+
+        is_pb = False
+        if "IsPersonalBest" in lap.index and pd.notna(lap.get("IsPersonalBest")):
+            is_pb = bool(lap["IsPersonalBest"])
+
+        rows.append({
+            "driver":          str(lap["Driver"]),
+            "lap_number":      int(lap["LapNumber"]),
+            "lap_time_s":      round(lap_time_s, 3),
+            "compound":        compound,
+            "stint":           stint,
+            "is_personal_best": is_pb,
+        })
+
+    return rows
+
+
 def _generate_summary(
     drivers: list[str],
     lap_times: dict[str, float],
@@ -351,3 +497,144 @@ def _generate_summary(
         parts.append(f"{d} was +{gap:.3f}s behind")
 
     return ". ".join(parts) + "."
+
+
+# ── Race positions ──────────────────────────────────────────────────────────
+
+@lru_cache(maxsize=10)
+def get_race_positions(year: int, race: str) -> dict:
+    """
+    Load lap-by-lap race data for all drivers.
+    Returns driver info and all lap records for race replay visualization.
+    """
+    logger.info("Loading race positions year=%d race=%s", year, race)
+
+    session = fastf1.get_session(year, race, "R")
+    session.load(laps=True, telemetry=False, weather=False, messages=False)
+
+    laps_df = session.laps
+
+    # Get race results for grid positions and driver info
+    results = (
+        session.results
+        if hasattr(session, "results") and session.results is not None
+        else pd.DataFrame()
+    )
+
+    drivers_info: dict[str, dict] = {}
+    laps_data: dict[str, list] = {}
+
+    all_drivers = laps_df["Driver"].unique() if len(laps_df) > 0 else []
+
+    for driver_code in all_drivers:
+        driver_laps = laps_df[laps_df["Driver"] == driver_code].copy()
+        driver_laps = driver_laps.sort_values("LapNumber")
+
+        # Get driver info from results or fall back to safe defaults
+        try:
+            if len(results) > 0 and driver_code in results["Abbreviation"].values:
+                result_row = results[results["Abbreviation"] == driver_code].iloc[0]
+                grid_raw = result_row.get("GridPosition", None)
+                grid_pos = int(grid_raw) if pd.notna(grid_raw) else 20
+                full_name = str(result_row.get("FullName", driver_code))
+                team_name = str(result_row.get("TeamName", "Unknown"))
+            else:
+                grid_pos = 20
+                full_name = driver_code
+                team_name = "Unknown"
+        except Exception:
+            grid_pos = 20
+            full_name = driver_code
+            team_name = "Unknown"
+
+        color = DRIVER_COLORS.get(driver_code, "#888888")
+
+        try:
+            driver_number = int(session.get_driver(driver_code)["DriverNumber"])
+        except Exception:
+            driver_number = 0
+
+        drivers_info[driver_code] = {
+            "code": driver_code,
+            "number": driver_number,
+            "name": full_name,
+            "team": team_name,
+            "color": color,
+            "grid_position": grid_pos,
+        }
+
+        laps_list: list[dict] = []
+        max_lap = int(driver_laps["LapNumber"].max()) if len(driver_laps) > 0 else 0
+
+        for _, lap_row in driver_laps.iterrows():
+            try:
+                raw_lap_time = lap_row["LapTime"]
+                lap_time_s = (
+                    raw_lap_time.total_seconds() if pd.notna(raw_lap_time) else None
+                )
+                if lap_time_s is None or lap_time_s <= 0:
+                    continue
+
+                compound = (
+                    str(lap_row.get("Compound", "UNKNOWN"))
+                    if pd.notna(lap_row.get("Compound"))
+                    else "UNKNOWN"
+                )
+                stint = (
+                    int(lap_row.get("Stint", 1))
+                    if pd.notna(lap_row.get("Stint"))
+                    else 1
+                )
+                lap_num = int(lap_row["LapNumber"])
+
+                # Detect pit stop from PitInTime / PitOutTime
+                pit_time: float | None = None
+                in_pit = False
+                try:
+                    pit_in = lap_row.get("PitInTime")
+                    pit_out = lap_row.get("PitOutTime")
+                    if pd.notna(pit_in) and pd.notna(pit_out):
+                        in_pit = True
+                        diff = pit_out - pit_in
+                        if hasattr(diff, "total_seconds"):
+                            pit_time = diff.total_seconds()
+                except Exception:
+                    pass
+
+                # Retirement heuristic: last lap significantly shorter than race distance
+                is_last_lap = lap_num == max_lap
+                retired = False
+                try:
+                    if is_last_lap and lap_time_s > 200:
+                        # Only flag as retired if driver clearly didn't complete the lap
+                        total_laps_in_race = int(laps_df["LapNumber"].max())
+                        if lap_num < total_laps_in_race:
+                            retired = True
+                except Exception:
+                    pass
+
+                laps_list.append({
+                    "lap": lap_num,
+                    "lap_time_s": round(lap_time_s, 3),
+                    "compound": compound,
+                    "stint": stint,
+                    "in_pit": in_pit,
+                    "pit_time_s": round(pit_time, 1) if pit_time is not None else None,
+                    "retired": retired,
+                    "position": None,
+                })
+            except Exception:
+                continue
+
+        if laps_list:
+            laps_data[driver_code] = laps_list
+
+    total_laps = int(laps_df["LapNumber"].max()) if len(laps_df) > 0 else 0
+
+    return {
+        "year": year,
+        "race": race,
+        "total_laps": total_laps,
+        "drivers": drivers_info,
+        "laps": laps_data,
+    }
