@@ -280,7 +280,7 @@ DRIVERS_DATA = [
     {"code": "OCO", "year": 2025, "first_name": "Esteban", "last_name": "Ocon", "number": 31, "team_id": "haas", "nationality": "French", "color": "#B6BABD"},
     {"code": "BOR", "year": 2025, "first_name": "Gabriel", "last_name": "Bortoleto", "number": 5, "team_id": "kick-sauber", "nationality": "Brazilian", "color": "#00CF46"},
     {"code": "HUL", "year": 2025, "first_name": "Nico", "last_name": "Hulkenberg", "number": 27, "team_id": "kick-sauber", "nationality": "German", "color": "#00CF46"},
-    {"code": "MAG", "year": 2025, "first_name": "Kevin", "last_name": "Magnussen", "number": 20, "team_id": "haas", "nationality": "Danish", "color": "#B6BABD"},
+    {"code": "BEA", "year": 2025, "first_name": "Oliver", "last_name": "Bearman", "number": 87, "team_id": "haas", "nationality": "British", "color": "#B6BABD"},
     {"code": "GAS", "year": 2025, "first_name": "Pierre", "last_name": "Gasly", "number": 10, "team_id": "alpine", "nationality": "French", "color": "#0090FF"},
     {"code": "DOO", "year": 2025, "first_name": "Jack", "last_name": "Doohan", "number": 7, "team_id": "alpine", "nationality": "Australian", "color": "#0090FF"},
     {"code": "TSU", "year": 2025, "first_name": "Yuki", "last_name": "Tsunoda", "number": 22, "team_id": "rb", "nationality": "Japanese", "color": "#6692FF"},
@@ -303,7 +303,7 @@ DRIVERS_DATA = [
     {"code": "BOR", "year": 2026, "first_name": "Gabriel", "last_name": "Bortoleto", "number": 5, "team_id": "audi", "nationality": "Brazilian", "color": "#FF0000"},
     {"code": "HUL", "year": 2026, "first_name": "Nico", "last_name": "Hulkenberg", "number": 27, "team_id": "audi", "nationality": "German", "color": "#FF0000"},
     {"code": "OCO", "year": 2026, "first_name": "Esteban", "last_name": "Ocon", "number": 31, "team_id": "haas", "nationality": "French", "color": "#B6BABD"},
-    {"code": "MAG", "year": 2026, "first_name": "Kevin", "last_name": "Magnussen", "number": 20, "team_id": "haas", "nationality": "Danish", "color": "#B6BABD"},
+    {"code": "BEA", "year": 2026, "first_name": "Oliver", "last_name": "Bearman", "number": 87, "team_id": "haas", "nationality": "British", "color": "#B6BABD"},
     {"code": "TSU", "year": 2026, "first_name": "Yuki", "last_name": "Tsunoda", "number": 22, "team_id": "rb", "nationality": "Japanese", "color": "#6692FF"},
     {"code": "HAD", "year": 2026, "first_name": "Isack", "last_name": "Hadjar", "number": 6, "team_id": "rb", "nationality": "French", "color": "#6692FF"},
     {"code": "ALB", "year": 2026, "first_name": "Alexander", "last_name": "Albon", "number": 23, "team_id": "williams", "nationality": "Thai", "color": "#37BEDD"},
@@ -768,9 +768,9 @@ async def seed_race_results(session, client):
 
 
 async def seed_weather(session, client):
-    logger.info("=== Seeding weather (2023, 2024, 2026) ===")
+    logger.info("=== Seeding weather (2023, 2024, 2025, 2026) ===")
     total = 0
-    for year in [2023, 2024, 2026]:
+    for year in [2023, 2024, 2025, 2026]:
         sessions_url = f"{OPENF1_BASE}/sessions?year={year}&session_name=Race"
         sessions_data = await fetch_json(client, sessions_url)
         if not sessions_data:
@@ -847,9 +847,9 @@ async def seed_weather(session, client):
 
 
 async def seed_tyre_strategies(session, client):
-    logger.info("=== Seeding tyre strategies (2023, 2024, 2026) ===")
+    logger.info("=== Seeding tyre strategies (2023, 2024, 2025, 2026) ===")
     total = 0
-    for year in [2023, 2024, 2026]:
+    for year in [2023, 2024, 2025, 2026]:
         sessions_url = f"{OPENF1_BASE}/sessions?year={year}&session_name=Race"
         sessions_data = await fetch_json(client, sessions_url)
         if not sessions_data:
@@ -903,9 +903,8 @@ async def seed_tyre_strategies(session, client):
                 driver_code = driver_map.get(driver_num)
                 if not driver_code:
                     continue
-                compound = stint.get("compound", "UNKNOWN")
-                if compound:
-                    compound = compound.upper()
+                compound = stint.get("compound") or "UNKNOWN"
+                compound = compound.upper() if compound else "UNKNOWN"
                 lap_start = stint.get("lap_start") or 1
                 lap_end = stint.get("lap_end") or lap_start
                 laps = max(1, lap_end - lap_start + 1)
