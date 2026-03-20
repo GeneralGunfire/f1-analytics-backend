@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-DATABASE_URL = os.getenv("DATABASE_URL", "")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 # Convert postgresql:// to postgresql+asyncpg:// if needed
 if DATABASE_URL.startswith("postgresql://"):
