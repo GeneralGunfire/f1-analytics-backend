@@ -214,7 +214,7 @@ async def get_circuit_info(
         raise HTTPException(status_code=404, detail=f"Round {round} not found in {year}")
     race, circuit = row
     data = {
-        "name":        race.name,
+        "name":        race.official_name or circuit.name,
         "country":     circuit.country,
         "location":    circuit.city,
         "lat":         float(circuit.lat) if circuit.lat else 0.0,
