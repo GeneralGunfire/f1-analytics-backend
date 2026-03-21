@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.routes import analytics, health, race, sessions, telemetry
 from app.routes.static_data import router as static_router
 from app.services.fastf1_service import init_fastf1_cache
+from sqlalchemy import text
 from app.database.connection import test_connection, engine, Base
 from app.database import models  # noqa: F401 — registers all ORM tables
 
@@ -43,6 +44,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+                # Add new columns if they don't exist yet (safe to run on every startup)
+                for col_sql in [
+                    "ALTER TABLE circuits ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION",
+                    "ALTER TABLE circuits ADD COLUMN IF NOT EXISTS lon DOUBLE PRECISION",
+                ]:
+                    await conn.execute(text(col_sql))
             logger.info("Tables ready")
         except Exception as e:
             logger.error("Migration failed: %s", e)

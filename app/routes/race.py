@@ -10,13 +10,22 @@ from typing import Annotated, Any
 
 import fastf1
 import pandas as pd
-from fastapi import APIRouter, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.database.connection import AsyncSessionLocal
+from app.database import models
 from app.services.fastf1_service import (
     DRIVER_COLORS,
     get_telemetry_compare,
 )
+
+
+async def get_db():
+    async with AsyncSessionLocal() as session:
+        yield session
 
 logger = logging.getLogger(__name__)
 
@@ -54,35 +63,35 @@ async def get_laps(
         raise HTTPException(status_code=422, detail=f"Invalid session type: {session}")
     try:
         sess = _load_session_laps(year, round, session.upper())
+        rows: list[dict] = []
+        for _, lap in sess.laps.iterrows():
+            lap_time = lap.get("LapTime")
+            if not pd.notna(lap_time):
+                continue
+            lap_time_s = float(lap_time.total_seconds())
+            if lap_time_s <= 0:
+                continue
+
+            def _safe_sector(col: str) -> float | None:
+                v = lap.get(col)
+                return round(float(v.total_seconds()), 3) if pd.notna(v) else None
+
+            rows.append({
+                "driver":          str(lap["Driver"]),
+                "lap":             int(lap["LapNumber"]),
+                "time":            round(lap_time_s, 3),
+                "sector1":         _safe_sector("Sector1Time"),
+                "sector2":         _safe_sector("Sector2Time"),
+                "sector3":         _safe_sector("Sector3Time"),
+                "compound":        str(lap["Compound"]) if pd.notna(lap.get("Compound")) else None,
+                "isPersonalBest":  bool(lap["IsPersonalBest"]) if pd.notna(lap.get("IsPersonalBest")) else False,
+            })
+        return _cached_response(rows)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.exception("Failed to load laps year=%d round=%d session=%s", year, round, session)
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    rows: list[dict] = []
-    for _, lap in sess.laps.iterrows():
-        lap_time = lap.get("LapTime")
-        if not pd.notna(lap_time):
-            continue
-        lap_time_s = float(lap_time.total_seconds())
-        if lap_time_s <= 0:
-            continue
-
-        def _safe_sector(col: str) -> float | None:
-            v = lap.get(col)
-            return round(float(v.total_seconds()), 3) if pd.notna(v) else None
-
-        rows.append({
-            "driver":          str(lap["Driver"]),
-            "lap":             int(lap["LapNumber"]),
-            "time":            round(lap_time_s, 3),
-            "sector1":         _safe_sector("Sector1Time"),
-            "sector2":         _safe_sector("Sector2Time"),
-            "sector3":         _safe_sector("Sector3Time"),
-            "compound":        str(lap["Compound"]) if pd.notna(lap.get("Compound")) else None,
-            "isPersonalBest":  bool(lap["IsPersonalBest"]) if pd.notna(lap.get("IsPersonalBest")) else False,
-        })
-
-    return _cached_response(rows)
+        raise HTTPException(status_code=503, detail="FastF1 lap data unavailable") from exc
 
 
 # ── GET /api/race/{year}/{round}/telemetry ─────────────────────────────────────
@@ -153,28 +162,37 @@ async def get_race_telemetry(
 
 # ── GET /api/race/{year}/{round}/positions ─────────────────────────────────────
 
-@router.get("/race/{year}/{round}/positions", summary="Driver positions on a given lap")
+@router.get("/race/{year}/{round}/positions", summary="Race classification position per lap")
 async def get_positions(
     year:  Annotated[int, Path(ge=2018, le=2030)],
     round: Annotated[int, Path(ge=1,    le=25)],
-    lap:   Annotated[int, Query(ge=1,   le=100)] = 1,
 ) -> JSONResponse:
+    """Returns lap-by-lap race classification positions for all drivers."""
     try:
         sess = _load_session_laps(year, round, "R")
+        # Build {driver: [{lap, position}, ...]} from laps DataFrame
+        result: dict[str, list[dict]] = {}
+        for _, lap in sess.laps.iterrows():
+            driver = str(lap["Driver"])
+            pos_val = lap.get("Position")
+            lap_num = lap.get("LapNumber")
+            if not pd.notna(pos_val) or not pd.notna(lap_num):
+                continue
+            if driver not in result:
+                result[driver] = []
+            result[driver].append({
+                "lap":      int(lap_num),
+                "position": int(pos_val),
+            })
+        # Sort each driver's laps by lap number
+        for driver in result:
+            result[driver].sort(key=lambda x: x["lap"])
+        return _cached_response(result)
+    except HTTPException:
+        raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    lap_df = sess.laps[sess.laps["LapNumber"] == lap]
-    positions: list[dict] = []
-    for _, row in lap_df.iterrows():
-        positions.append({
-            "driver": str(row["Driver"]),
-            "x":      float(row.get("X", 0) or 0),
-            "y":      float(row.get("Y", 0) or 0),
-            "z":      0.0,
-        })
-
-    return _cached_response(positions)
+        logger.exception("Failed to load positions year=%d round=%d", year, round)
+        raise HTTPException(status_code=503, detail="FastF1 position data unavailable") from exc
 
 
 # ── GET /api/circuit/{year}/{round}/info ──────────────────────────────────────
@@ -183,27 +201,31 @@ async def get_positions(
 async def get_circuit_info(
     year:  Annotated[int, Path(ge=2018, le=2030)],
     round: Annotated[int, Path(ge=1,    le=25)],
+    db:    AsyncSession = Depends(get_db),
 ) -> JSONResponse:
-    try:
-        schedule = fastf1.get_event_schedule(year, include_testing=False)
-        row = schedule[schedule["RoundNumber"] == round]
-        if row.empty:
-            raise HTTPException(status_code=404, detail=f"Round {round} not in {year} schedule")
-        r = row.iloc[0]
-        data = {
-            "name":        str(r.get("OfficialEventName", "")),
-            "country":     str(r.get("Country", "")),
-            "location":    str(r.get("Location", "")),
-            "lat":         float(r.get("Lat", 0) or 0),
-            "lon":         float(r.get("Long", 0) or 0),
-            "trackLength": 0,
-            "lapRecord":   0,
-        }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
+    # Look up race -> circuit from DB (no FastF1 network call needed)
+    result = await db.execute(
+        select(models.Race, models.Circuit)
+        .join(models.Circuit, models.Race.circuit_id == models.Circuit.id)
+        .where(models.Race.year == year, models.Race.round == round)
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Round {round} not found in {year}")
+    race, circuit = row
+    data = {
+        "name":        race.name,
+        "country":     circuit.country,
+        "location":    circuit.city,
+        "lat":         float(circuit.lat) if circuit.lat else 0.0,
+        "lon":         float(circuit.lon) if circuit.lon else 0.0,
+        "trackLength": float(circuit.length_km) if circuit.length_km else 0,
+        "turns":       circuit.turns or 0,
+        "drsZones":    circuit.drs_zones or 0,
+        "lapRecord":   circuit.lap_record_time or "",
+        "lapRecordDriver": circuit.lap_record_driver or "",
+        "lapRecordYear":   circuit.lap_record_year or 0,
+    }
     return _cached_response(data)
 
 

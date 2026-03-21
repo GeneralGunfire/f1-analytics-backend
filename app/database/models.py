@@ -1,5 +1,5 @@
 from sqlalchemy import (
-    Column, Integer, String, Date, Numeric,
+    Column, Integer, String, Date, Numeric, Float,
     Boolean, ForeignKey, UniqueConstraint, Text
 )
 from app.database.connection import Base
@@ -19,6 +19,8 @@ class Circuit(Base):
     length_km = Column(Numeric(5, 3))
     turns = Column(Integer)
     drs_zones = Column(Integer)
+    lat = Column(Float)
+    lon = Column(Float)
     fastf1_key = Column(String(100), nullable=False)
     image_key = Column(String(100))
 
