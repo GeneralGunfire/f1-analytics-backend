@@ -1,7 +1,8 @@
 from sqlalchemy import (
-    Column, Integer, String, Date, Numeric, Float,
+    Column, Integer, String, Date, DateTime, Numeric, Float,
     Boolean, ForeignKey, UniqueConstraint, Text
 )
+from datetime import datetime
 from app.database.connection import Base
 
 
@@ -112,3 +113,43 @@ class TyreStrategy(Base):
     stint_number = Column(Integer, nullable=False)
     compound = Column(String(20), nullable=False)
     laps = Column(Integer, nullable=False)
+
+
+class TelemetrySession(Base):
+    __tablename__ = "telemetry_sessions"
+    __table_args__ = (UniqueConstraint("race_id", "session_type"),)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    race_id = Column(Integer, ForeignKey("races.id"), nullable=False)
+    session_type = Column(String(10), nullable=False)
+    # Q = Qualifying, R = Race, FP1/FP2/FP3 = Practice
+    distance_points = Column(Integer, default=500)
+    computed_at = Column(DateTime, default=datetime.utcnow)
+    status = Column(String(20), default="complete")
+    # complete, partial, failed
+
+
+class DriverTelemetry(Base):
+    __tablename__ = "driver_telemetry"
+    __table_args__ = (
+        UniqueConstraint("session_id", "driver_code"),
+    )
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    session_id = Column(
+        Integer, ForeignKey("telemetry_sessions.id"), nullable=False
+    )
+    driver_code = Column(String(3), nullable=False)
+    fastest_lap_time = Column(String(20))
+    fastest_lap_seconds = Column(Numeric(8, 3))
+    top_speed_kmh = Column(Numeric(6, 1))
+    avg_speed_kmh = Column(Numeric(6, 1))
+    throttle_avg_pct = Column(Numeric(5, 1))
+    brake_events = Column(Integer)
+    # Telemetry arrays stored as JSON text
+    # Format: [val1, val2, ...] — 500 points each
+    speed_trace = Column(Text)
+    throttle_trace = Column(Text)
+    brake_trace = Column(Text)
+    gear_trace = Column(Text)
+    distance_trace = Column(Text)
+    delta_trace = Column(Text)
+    # Delta vs fastest driver in session, 0.0 for fastest driver

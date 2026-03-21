@@ -8,7 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
-from app.routes import analytics, health, race, sessions, telemetry
+from app.routes import analytics, health, race, sessions
+from app.routes.telemetry_db import router as telemetry_router
 from app.routes.static_data import router as static_router
 from app.services.fastf1_service import init_fastf1_cache
 from sqlalchemy import text
@@ -101,7 +102,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 app.include_router(health.router)
 app.include_router(sessions.router)
-app.include_router(telemetry.router)
+app.include_router(telemetry_router)
 app.include_router(analytics.router)
 app.include_router(race.router)
 app.include_router(static_router)
