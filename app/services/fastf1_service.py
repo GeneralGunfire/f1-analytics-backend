@@ -24,9 +24,9 @@ DRIVER_COLORS: dict[str, str] = {
     "ZHO": "#900000", "BOT": "#900000",
     "MAG": "#B6BABD", "HUL": "#B6BABD",
     "ALB": "#64C4FF", "SAR": "#64C4FF",
-    "LAW": "#356CAC", "BEA": "#B6BABD",
-    "ANT": "#27F4D2", "DOO": "#FF8000",
-    "HAD": "#64C4FF",
+    "LAW": "#3671C6", "BEA": "#B6BABD",
+    "ANT": "#27F4D2", "DOO": "#0090FF",
+    "HAD": "#356CAC",
 }
 
 
