@@ -11,6 +11,7 @@ from app.config import get_settings
 from app.routes import analytics, health, race, sessions
 from app.routes.telemetry_db import router as telemetry_router
 from app.routes.static_data import router as static_router
+from app.routes.replay import router as replay_router
 from app.services.fastf1_service import init_fastf1_cache
 from sqlalchemy import text
 from app.database.connection import test_connection, engine, Base
@@ -106,3 +107,4 @@ app.include_router(telemetry_router)
 app.include_router(analytics.router)
 app.include_router(race.router)
 app.include_router(static_router)
+app.include_router(replay_router)

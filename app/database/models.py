@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String, Date, DateTime, Numeric, Float,
-    Boolean, ForeignKey, UniqueConstraint, Text
+    Boolean, ForeignKey, UniqueConstraint, Text, Index
 )
 from datetime import datetime
 from app.database.connection import Base
@@ -153,3 +153,69 @@ class DriverTelemetry(Base):
     distance_trace = Column(Text)
     delta_trace = Column(Text)
     # Delta vs fastest driver in session, 0.0 for fastest driver
+
+
+# ---------------------------------------------------------------------------
+# Race Replay Models
+# ---------------------------------------------------------------------------
+
+
+class TrackMap(Base):
+    __tablename__ = "track_maps"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    circuit_id = Column(String(50), ForeignKey("circuits.id"), nullable=False)
+    x = Column(Float, nullable=False)
+    y = Column(Float, nullable=False)
+    point_order = Column(Integer, nullable=False)
+    is_pit_lane = Column(Boolean, default=False)
+    sector = Column(Integer)          # 1, 2, or 3
+    is_drs_zone = Column(Boolean, default=False)
+
+
+class RaceReplaySession(Base):
+    __tablename__ = "race_replay_sessions"
+    __table_args__ = (UniqueConstraint("race_id"),)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    race_id = Column(Integer, ForeignKey("races.id"), nullable=False)
+    status = Column(String(20), default="pending")  # pending/complete/failed
+    frame_count = Column(Integer, default=0)
+    extracted_at = Column(DateTime)
+    duration_seconds = Column(Float)
+    total_laps = Column(Integer)
+
+
+class RaceFrame(Base):
+    __tablename__ = "race_frames"
+    __table_args__ = (
+        Index("ix_race_frames_session_lap_ts",
+              "replay_session_id", "lap", "timestamp_ms"),
+    )
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    replay_session_id = Column(
+        Integer, ForeignKey("race_replay_sessions.id"), nullable=False
+    )
+    lap = Column(Integer, nullable=False)
+    timestamp_ms = Column(Integer, nullable=False)
+    driver_code = Column(String(3), nullable=False)
+    x = Column(Float)
+    y = Column(Float)
+    speed = Column(Float)
+    gear = Column(Integer)
+    drs = Column(Boolean, default=False)
+    is_in_pit = Column(Boolean, default=False)
+    position_in_race = Column(Integer)
+
+
+class RaceEvent(Base):
+    __tablename__ = "race_events"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    replay_session_id = Column(
+        Integer, ForeignKey("race_replay_sessions.id"), nullable=False
+    )
+    lap = Column(Integer)
+    timestamp_ms = Column(Integer)
+    event_type = Column(String(50), nullable=False)
+    driver_code = Column(String(3))
+    description = Column(String(500))
+    x = Column(Float)
+    y = Column(Float)
