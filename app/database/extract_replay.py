@@ -22,7 +22,7 @@ import argparse
 import logging
 import os
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 
 import fastf1
 import numpy as np
@@ -560,7 +560,7 @@ def extract_race(
     # Finalise
     rs.status = "complete"
     rs.frame_count = total_frames
-    rs.extracted_at = datetime.utcnow()
+    rs.extracted_at = datetime.now(timezone.utc)
     db.commit()
 
     logger.info(f"\n  DONE — {total_frames} frames | {event_count} events | {total_laps} laps")
