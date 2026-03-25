@@ -90,13 +90,45 @@ def _load_f1_session(year: int, fastf1_key: str, session_name: str):
 # Track map
 # ---------------------------------------------------------------------------
 
-def extract_track_map(db: Session, circuit_id: str, pos_data: dict) -> bool:
-    """Persist track outline from first driver's position data."""
-    if db.execute(
+def _deduplicate_track_points(xs: np.ndarray, ys: np.ndarray, min_dist_m: float = 5.0) -> tuple:
+    """
+    Remove near-duplicate consecutive points (stationary car, pre-race grid wait).
+    Keeps a point only if it is >= min_dist_m from the previously kept point.
+    Uses Euclidean distance in FastF1's Cartesian coordinate space (metres).
+    Returns filtered (xs, ys) arrays.
+    """
+    if len(xs) == 0:
+        return xs, ys
+    keep_x = [xs[0]]
+    keep_y = [ys[0]]
+    for x, y in zip(xs[1:], ys[1:]):
+        dx = x - keep_x[-1]
+        dy = y - keep_y[-1]
+        if (dx * dx + dy * dy) >= min_dist_m * min_dist_m:
+            keep_x.append(x)
+            keep_y.append(y)
+    return np.array(keep_x), np.array(keep_y)
+
+
+def extract_track_map(db: Session, circuit_id: str, pos_data: dict, force: bool = False) -> bool:
+    """Persist track outline from first driver's position data.
+
+    Uses deduplication to strip stationary pre-race grid rows (the root cause of
+    the first ~2500/5000 points being identical in the original extraction).
+    """
+    existing = db.execute(
         select(TrackMap).where(TrackMap.circuit_id == circuit_id).limit(1)
-    ).scalar_one_or_none():
+    ).scalar_one_or_none()
+    if existing and not force:
         logger.info(f"  Track map already present for {circuit_id}")
         return True
+
+    if existing and force:
+        db.execute(
+            TrackMap.__table__.delete().where(TrackMap.circuit_id == circuit_id)
+        )
+        db.commit()
+        logger.info(f"  Deleted existing track map for {circuit_id} (force re-extract)")
 
     try:
         sample_df = None
@@ -105,7 +137,8 @@ def extract_track_map(db: Session, circuit_id: str, pos_data: dict) -> bool:
                 continue
             if "X" not in drv_df.columns or "Y" not in drv_df.columns:
                 continue
-            clean = drv_df[["X", "Y"]].head(5000).dropna()
+            # Use ALL data (not just head(5000)) so the full lap is captured
+            clean = drv_df[["X", "Y"]].dropna()
             if len(clean) >= 100:
                 sample_df = clean
                 break
@@ -114,8 +147,13 @@ def extract_track_map(db: Session, circuit_id: str, pos_data: dict) -> bool:
             logger.warning("  No usable position data for track map")
             return False
 
-        xs = sample_df["X"].values.astype(float)
-        ys = sample_df["Y"].values.astype(float)
+        xs_raw = sample_df["X"].values.astype(float)
+        ys_raw = sample_df["Y"].values.astype(float)
+
+        # Remove near-duplicate points (stationary grid wait, pit lane standing)
+        xs, ys = _deduplicate_track_points(xs_raw, ys_raw, min_dist_m=5.0)
+        logger.info(f"  Track map: {len(xs_raw)} raw → {len(xs)} after dedup (5m threshold)")
+
         x_c, y_c = xs.mean(), ys.mean()
 
         rows = [
@@ -270,12 +308,19 @@ def _extract_frames(
     y_center: float,
 ) -> int:
     """
-    For each driver: convert SessionTime (ns) → Timedelta, filter by lap window,
-    resample to 250ms, store as RaceFrame rows.
+    For each driver: merge pos_data (X/Y) with car_data (Speed, nGear, DRS),
+    filter by lap window, resample to 250ms, store as RaceFrame rows.
+    Also extracts position_in_race from laps data.
     """
     total_frames = 0
 
-    # Build lap window lookup: { driver_number_str: { lap_num: (start_td, end_td, code) } }
+    # Load car_data for speed + gear (Speed km/h, nGear 1-8, DRS 0/10/12/14)
+    try:
+        car_data = sess.car_data  # dict: {driver_num_str: DataFrame}
+    except Exception:
+        car_data = {}
+
+    # Build lap window lookup: { driver_number_str: { lap_num: (start_td, end_td, code, position) } }
     lap_windows: dict[str, dict[int, tuple]] = {}
     for _, row in sess.laps.iterrows():
         drv_num = str(row.get("DriverNumber", ""))
@@ -283,11 +328,13 @@ def _extract_frames(
         lap_num_raw = row.get("LapNumber")
         lap_start = row.get("LapStartTime")
         lap_end = row.get("Time")
+        position = row.get("Position", None)
         if pd.isna(lap_num_raw) or pd.isna(lap_start) or pd.isna(lap_end):
             continue
+        pos_int = int(position) if position is not None and not pd.isna(position) else None
         if drv_num not in lap_windows:
             lap_windows[drv_num] = {}
-        lap_windows[drv_num][int(lap_num_raw)] = (lap_start, lap_end, drv_code)
+        lap_windows[drv_num][int(lap_num_raw)] = (lap_start, lap_end, drv_code, pos_int)
 
     for lap_num in range(1, total_laps + 1):
         lap_batch: list[RaceFrame] = []
@@ -302,7 +349,7 @@ def _extract_frames(
                 windows = lap_windows.get(str(drv_num), {})
                 if lap_num not in windows:
                     continue
-                lap_start, lap_end, drv_code = windows[lap_num]
+                lap_start, lap_end, drv_code, position_in_race = windows[lap_num]
 
                 # SessionTime is nanoseconds — convert to Timedelta for comparison
                 session_time_td = pd.to_timedelta(drv_df["SessionTime"].values, unit="ns")
@@ -311,8 +358,37 @@ def _extract_frames(
                 if lap_df.empty:
                     continue
 
-                # Set Timedelta index for resample
-                lap_df.index = pd.to_timedelta(drv_df["SessionTime"].values[mask], unit="ns")
+                # Merge car_data (Speed, nGear, DRS) on nearest SessionTime
+                drv_car = car_data.get(str(drv_num))
+                if drv_car is not None and not drv_car.empty and "SessionTime" in drv_car.columns:
+                    try:
+                        # Both use nanosecond SessionTime — convert to Timedelta, merge_asof
+                        car_td = pd.to_timedelta(drv_car["SessionTime"].values, unit="ns")
+                        drv_car_indexed = drv_car.copy()
+                        drv_car_indexed.index = car_td
+                        lap_df.index = pd.to_timedelta(lap_df["SessionTime"].values, unit="ns")
+
+                        # Keep only useful car_data columns
+                        car_cols = [c for c in ["Speed", "nGear", "DRS"] if c in drv_car.columns]
+                        car_sub = drv_car_indexed[car_cols].sort_index()
+                        lap_df_sorted = lap_df.sort_index()
+
+                        merged = pd.merge_asof(
+                            lap_df_sorted,
+                            car_sub,
+                            left_index=True,
+                            right_index=True,
+                            tolerance=pd.Timedelta("200ms"),
+                            direction="nearest",
+                        )
+                        lap_df = merged
+                    except Exception as merge_err:
+                        logger.debug(f"    car_data merge failed for {drv_num} lap {lap_num}: {merge_err}")
+                        # Fall back to pos_data only — speed/gear will be None
+                        lap_df.index = pd.to_timedelta(lap_df["SessionTime"].values, unit="ns")
+                else:
+                    lap_df.index = pd.to_timedelta(lap_df["SessionTime"].values, unit="ns")
+
                 lap_resampled = lap_df.resample(RESAMPLE_INTERVAL).last()
                 lap_resampled = lap_resampled.dropna(subset=["X", "Y"])
                 if lap_resampled.empty:
@@ -325,7 +401,19 @@ def _extract_frames(
                     y_raw = row_pos["Y"]
                     if pd.isna(x_raw) or pd.isna(y_raw):
                         continue
+
+                    # Speed from car_data (km/h)
                     speed_raw = row_pos.get("Speed", None)
+                    speed_val = round(float(speed_raw), 1) if speed_raw is not None and not pd.isna(speed_raw) else None
+
+                    # Gear from car_data nGear (1-8)
+                    gear_raw = row_pos.get("nGear", None)
+                    gear_val = int(gear_raw) if gear_raw is not None and not pd.isna(gear_raw) else None
+
+                    # DRS from car_data (0=closed, 10/12/14=open)
+                    drs_raw = row_pos.get("DRS", 0)
+                    drs_open = bool(drs_raw is not None and not pd.isna(drs_raw) and int(drs_raw) >= 10)
+
                     status_val = row_pos.get("Status", "") if has_status else ""
                     lap_batch.append(RaceFrame(
                         replay_session_id=replay_id,
@@ -334,11 +422,11 @@ def _extract_frames(
                         driver_code=drv_code,
                         x=round(float(x_raw) - x_center, 1),
                         y=round(float(y_raw) - y_center, 1),
-                        speed=round(float(speed_raw), 1) if speed_raw is not None and not pd.isna(speed_raw) else None,
-                        gear=None,
-                        drs=False,
+                        speed=speed_val,
+                        gear=gear_val,
+                        drs=drs_open,
                         is_in_pit=str(status_val).strip() in ("PitLane", "Pit"),
-                        position_in_race=None,
+                        position_in_race=position_in_race,
                     ))
 
             except Exception as e:
@@ -369,20 +457,33 @@ def extract_race(
     circuit_id: str,
     race_name: str,
     session_name: str = "Race",
+    force: bool = False,
 ) -> bool:
     logger.info(f"\n{'='*60}")
     logger.info(f"Processing: {year} {race_name} ({session_name})")
     logger.info(f"{'='*60}")
 
-    # Skip if already done
     existing = db.execute(
         select(RaceReplaySession).where(RaceReplaySession.race_id == race_id)
     ).scalar_one_or_none()
-    if existing and existing.status == "complete":
-        logger.info("  Already extracted — skipping")
+
+    if existing and existing.status == "complete" and not force:
+        logger.info("  Already extracted — skipping (use --force to re-extract)")
         return True
 
-    if existing:
+    if existing and force:
+        logger.info(f"  Force re-extract: deleting existing frames for replay_session {existing.id}")
+        db.execute(
+            RaceFrame.__table__.delete().where(RaceFrame.replay_session_id == existing.id)
+        )
+        db.execute(
+            RaceEvent.__table__.delete().where(RaceEvent.replay_session_id == existing.id)
+        )
+        db.commit()
+        rs = existing
+        rs.status = "pending"
+        rs.frame_count = 0
+    elif existing:
         rs = existing
         rs.status = "pending"
         rs.frame_count = 0
@@ -444,8 +545,8 @@ def extract_race(
     x_center = float(np.mean(all_x))
     y_center = float(np.mean(all_y))
 
-    # Track map
-    extract_track_map(db, circuit_id, pos_data)
+    # Track map — force=True so re-extraction regenerates with fixed dedup logic
+    extract_track_map(db, circuit_id, pos_data, force=True)
 
     # Position frames
     logger.info("  Extracting position frames...")
@@ -475,6 +576,7 @@ def main():
     parser.add_argument("--year", type=int)
     parser.add_argument("--race", type=str)
     parser.add_argument("--session", type=str, default="R")
+    parser.add_argument("--force", action="store_true", help="Re-extract even if already complete")
     args = parser.parse_args()
 
     session_map = {
@@ -505,6 +607,7 @@ def main():
                     db=db, race_id=race.id, year=race.year,
                     fastf1_key=race.fastf1_key, circuit_id=race.circuit_id,
                     race_name=race.circuit_id, session_name=session_name,
+                    force=args.force,
                 )
                 if ok:
                     success += 1

@@ -193,7 +193,7 @@ async def compare_telemetry(
             "top_speed":  float(dt.top_speed_kmh) if dt.top_speed_kmh else None,
             "distance":   json.loads(dt.distance_trace) if dt.distance_trace else [],
             "speed":      json.loads(dt.speed_trace)    if dt.speed_trace    else [],
-            "throttle":   json.loads(dt.throttle_trace) if dt.throttle_trace else [],
+            "throttle":   [round(v / 100.0, 4) for v in json.loads(dt.throttle_trace)] if dt.throttle_trace else [],
             "brake":      json.loads(dt.brake_trace)    if dt.brake_trace    else [],
             "gear":       json.loads(dt.gear_trace)     if dt.gear_trace     else [],
             "delta":      json.loads(dt.delta_trace)    if dt.delta_trace    else [],
